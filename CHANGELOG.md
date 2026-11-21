@@ -21,3 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for MySQL, MariaDB, and PostgreSQL databases
 - Username validation for RDS connections
 - Filtering of Oracle databases (no IAM auth support)
+
+### Security
+- Build with Go 1.27.4 (Go 1.25.0 had reachable standard-library vulnerabilities) and run `govulncheck` on every PR

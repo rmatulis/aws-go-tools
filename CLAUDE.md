@@ -22,6 +22,7 @@ go test -v -run 'TestInstanceStruct/<subtest name>' ./...   # single table-drive
 go test -v -race -coverprofile=coverage.out ./...       # what CI runs
 make fmt                        # go fmt ./...
 go vet ./...                    # CI runs this; there is no make target for it
+go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...   # CI runs this; fails on reachable vulnerabilities
 make lint                       # golangci-lint run (skipped with a message if not installed)
 make deps                       # go mod download && go mod tidy
 go run main.go ec2 --profile <profile> [--region <region>]
@@ -29,7 +30,7 @@ go run main.go ec2 --profile <profile> [--region <region>]
 
 The version is injected at build time with `-ldflags "-X 'main.Version=...'"`; a plain `go build` reports `dev`.
 
-CI (`.github/workflows/pr-validation.yml`) fails a PR on `gofmt -l .` output, `go vet`, test failures, or any of the five cross-compile targets (built with `CGO_ENABLED=0`). golangci-lint runs with `continue-on-error`, so it is advisory only.
+CI (`.github/workflows/pr-validation.yml`) fails a PR on `gofmt -l .` output, `go vet`, test failures, reachable vulnerabilities reported by `govulncheck`, or any of the five cross-compile targets (built with `CGO_ENABLED=0`). golangci-lint runs with `continue-on-error`, so it is advisory only.
 
 ## Architecture
 

@@ -59,6 +59,9 @@ jobs:
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+
       - name: Generate coverage report
         run: go tool cover -html=coverage.out -o coverage.html
         if: always()
