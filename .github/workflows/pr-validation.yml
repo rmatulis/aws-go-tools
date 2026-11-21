@@ -21,7 +21,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
 
       - name: Check formatting
         run: |
@@ -34,12 +34,11 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      - name: Install golangci-lint
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.55.2
-
       - name: Run golangci-lint
-        run: $(go env GOPATH)/bin/golangci-lint run --timeout 5m
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          args: --timeout 5m
         continue-on-error: true
 
   test:
@@ -52,7 +51,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
 
       - name: Download dependencies
         run: go mod download
@@ -95,7 +94,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
 
       - name: Download dependencies
         run: go mod download
@@ -106,7 +105,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
-          OUTPUT_NAME="ec2-ssm-connector-${{ matrix.goos }}-${{ matrix.goarch }}"
+          OUTPUT_NAME="aws-go-tools-${{ matrix.goos }}-${{ matrix.goarch }}"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             OUTPUT_NAME="${OUTPUT_NAME}.exe"
           fi
