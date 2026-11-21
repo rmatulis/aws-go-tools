@@ -481,3 +481,57 @@ func TestDefaultConfigPaths(t *testing.T) {
 	t.Run("with HOME", func(t *testing.T) { t.Setenv("HOME", t.TempDir()); check(t) })
 	t.Run("HOME unset", func(t *testing.T) { t.Setenv("HOME", ""); check(t) })
 }
+
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"admin":   `'admin'`,
+		"o'brien": `'o'\''brien'`,
+		"a b;id":  `'a b;id'`,
+		"":        `''`,
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestRDSConnectionExamples(t *testing.T) {
+	join := func(engine, user string) string {
+		return strings.Join(rdsConnectionExamples(engine, "db.example.internal", 5432, user), "\n")
+	}
+	t.Run("postgres verifies the certificate", func(t *testing.T) {
+		out := join("aurora-postgresql", "app")
+		for _, want := range []string{"sslmode=verify-full", "sslrootcert=./global-bundle.pem", `PGPASSWORD="$RDS_TOKEN"`, "host=db.example.internal", "port=5432"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "sslmode=require") {
+			t.Error("unverified sslmode present")
+		}
+	})
+	t.Run("mysql verifies the certificate", func(t *testing.T) {
+		out := join("mariadb", "app")
+		for _, want := range []string{"--ssl-mode=VERIFY_IDENTITY", "--ssl-ca=./global-bundle.pem", `MYSQL_PWD="$RDS_TOKEN"`, "-u 'app'"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "--password") || strings.Contains(out, "REQUIRED") {
+			t.Error("password argument or unverified ssl-mode present")
+		}
+	})
+	t.Run("username with a quote is escaped", func(t *testing.T) {
+		if out := join("mysql", "o'brien"); !strings.Contains(out, `'o'\''brien'`) {
+			t.Errorf("unescaped username in:\n%s", out)
+		}
+		if out := join("postgres", "o'brien"); !strings.Contains(out, `-U 'o'\''brien'`) || !strings.Contains(out, "PGSSLMODE=verify-full") {
+			t.Errorf("want -U form with quoted user, got:\n%s", out)
+		}
+	})
+	t.Run("unknown engine yields no commands", func(t *testing.T) {
+		if got := rdsConnectionExamples("sqlserver-se", "h", 1433, "sa"); len(got) != 0 {
+			t.Errorf("got %v", got)
+		}
+	})
+}

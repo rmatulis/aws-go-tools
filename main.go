@@ -625,27 +625,19 @@ func generateRDSAuthToken(ctx context.Context, cfg aws.Config, instance RDSInsta
 	fmt.Println(strings.Repeat("=", 120))
 	fmt.Println()
 
-	// Display connection examples
-	fmt.Println("Connection Examples:")
-	fmt.Println()
-
-	// MySQL/MariaDB
-	if strings.Contains(strings.ToLower(instance.Engine), "mysql") || strings.Contains(strings.ToLower(instance.Engine), "mariadb") {
-		fmt.Println("MySQL/MariaDB:")
-		fmt.Printf("  mysql -h %s -P %d -u %s --password='%s' --enable-cleartext-plugin --ssl-mode=REQUIRED\n",
-			instance.Endpoint, instance.Port, username, authToken)
+	// Display connection examples. The token is never repeated in them: it
+	// would end up in shell history and in the process list.
+	if examples := rdsConnectionExamples(instance.Engine, instance.Endpoint, instance.Port, username); len(examples) > 0 {
+		fmt.Println("Load the token into your shell without putting it in history:")
+		fmt.Println("  read -rs RDS_TOKEN && export RDS_TOKEN     # paste the token, press Enter")
+		fmt.Println("Download the RDS CA bundle once:")
+		fmt.Println("  curl -fsSLo global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem")
 		fmt.Println()
-	}
-
-	// PostgreSQL
-	if strings.Contains(strings.ToLower(instance.Engine), "postgres") {
-		fmt.Println("PostgreSQL:")
-		fmt.Printf("  psql \"host=%s port=%d dbname=your_database user=%s password=%s sslmode=require\"\n",
-			instance.Endpoint, instance.Port, username, authToken)
+		fmt.Println("Connection Examples:")
 		fmt.Println()
-		fmt.Println("Or using environment variable:")
-		fmt.Printf("  export PGPASSWORD='%s'\n", authToken)
-		fmt.Printf("  psql -h %s -p %d -U %s -d your_database\n", instance.Endpoint, instance.Port, username)
+		for _, line := range examples {
+			fmt.Println(line)
+		}
 		fmt.Println()
 	}
 
@@ -653,8 +645,48 @@ func generateRDSAuthToken(ctx context.Context, cfg aws.Config, instance RDSInsta
 	fmt.Println("  - Token is valid for 15 minutes from generation time")
 	fmt.Println("  - IAM database authentication must be enabled on the RDS instance")
 	fmt.Println("  - The database user must be configured to use IAM authentication")
-	fmt.Println("  - SSL/TLS connection is required")
+	fmt.Println("  - SSL/TLS with certificate verification is required; the examples verify against the RDS CA bundle")
 	fmt.Printf("  - Generated at: %s\n", time.Now().Format(time.RFC3339))
+
+	return nil
+}
+
+// shellQuote wraps s in single quotes so a POSIX shell treats it as one
+// literal word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+var conninfoSafe = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+
+// rdsConnectionExamples returns copy-paste client commands for the engine, or
+// nil for an engine with no known client. The commands read the token from
+// $RDS_TOKEN and verify the server certificate against the RDS CA bundle. The
+// function does not receive the token, so no example can contain it.
+func rdsConnectionExamples(engine, endpoint string, port int32, username string) []string {
+	engine = strings.ToLower(engine)
+
+	switch {
+	case strings.Contains(engine, "mysql") || strings.Contains(engine, "mariadb"):
+		return []string{
+			"MySQL/MariaDB:",
+			fmt.Sprintf("  MYSQL_PWD=\"$RDS_TOKEN\" mysql -h %s -P %d -u %s --enable-cleartext-plugin --ssl-mode=VERIFY_IDENTITY --ssl-ca=./global-bundle.pem",
+				endpoint, port, shellQuote(username)),
+		}
+	case strings.Contains(engine, "postgres"):
+		if conninfoSafe.MatchString(username) {
+			return []string{
+				"PostgreSQL:",
+				fmt.Sprintf("  PGPASSWORD=\"$RDS_TOKEN\" psql \"host=%s port=%d dbname=your_database user=%s sslmode=verify-full sslrootcert=./global-bundle.pem\"",
+					endpoint, port, username),
+			}
+		}
+		return []string{
+			"PostgreSQL:",
+			fmt.Sprintf("  PGPASSWORD=\"$RDS_TOKEN\" PGSSLMODE=verify-full PGSSLROOTCERT=./global-bundle.pem psql -h %s -p %d -U %s -d your_database",
+				endpoint, port, shellQuote(username)),
+		}
+	}
 
 	return nil
 }

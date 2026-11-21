@@ -308,16 +308,21 @@ IAM Authentication Token (valid for 15 minutes):
 prod-db.abc123xyz.us-east-1.rds.amazonaws.com:3306/?Action=connect&DBUser=admin&X-Amz-Algorithm=...
 ========================================================================================================================
 
+Load the token into your shell without putting it in history:
+  read -rs RDS_TOKEN && export RDS_TOKEN     # paste the token, press Enter
+Download the RDS CA bundle once:
+  curl -fsSLo global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
 Connection Examples:
 
 MySQL/MariaDB:
-  mysql -h prod-db.abc123xyz.us-east-1.rds.amazonaws.com -P 3306 -u admin --password='[TOKEN]' --enable-cleartext-plugin --ssl-mode=REQUIRED
+  MYSQL_PWD="$RDS_TOKEN" mysql -h prod-db.abc123xyz.us-east-1.rds.amazonaws.com -P 3306 -u 'admin' --enable-cleartext-plugin --ssl-mode=VERIFY_IDENTITY --ssl-ca=./global-bundle.pem
 
 Notes:
   - Token is valid for 15 minutes from generation time
   - IAM database authentication must be enabled on the RDS instance
   - The database user must be configured to use IAM authentication
-  - SSL/TLS connection is required
+  - SSL/TLS with certificate verification is required; the examples verify against the RDS CA bundle
   - Generated at: 2025-12-23T10:30:00Z
 ```
 

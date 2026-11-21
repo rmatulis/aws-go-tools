@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filtering of Oracle databases (no IAM auth support)
 
 ### Security
+- The RDS token is printed once and no longer repeated inside the example commands; the examples read it from `$RDS_TOKEN`
+- `mysql`/`psql` examples now verify the server certificate against the RDS CA bundle (`VERIFY_IDENTITY` / `verify-full`)
 - **Behaviour change:** `config.yaml` is no longer read from the current directory; use `~/.aws-go-tools/config.yaml`, `/etc/aws-go-tools/config.yaml` or the new `--config` flag
 - Shell values from the config file are validated (bare executable path, no spaces or arguments); an invalid or malformed config file is now an error
 - Build with Go 1.27.4 (Go 1.25.0 had reachable standard-library vulnerabilities) and run `govulncheck` on every PR
