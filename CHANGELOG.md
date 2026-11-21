@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Filtering of Oracle databases (no IAM auth support)
 
 ### Security
+- Release workflow: PR label names are passed to the version-bump script through the environment instead of being pasted into it
 - The RDS token is printed once and no longer repeated inside the example commands; the examples read it from `$RDS_TOKEN`
 - `mysql`/`psql` examples now verify the server certificate against the RDS CA bundle (`VERIFY_IDENTITY` / `verify-full`)
 - **Behaviour change:** `config.yaml` is no longer read from the current directory; use `~/.aws-go-tools/config.yaml`, `/etc/aws-go-tools/config.yaml` or the new `--config` flag

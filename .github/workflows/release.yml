@@ -28,10 +28,12 @@ jobs:
 
       - name: Determine version bump from PR labels
         id: determine_bump
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           BUMP_TYPE="patch"
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            LABELS="${{ join(github.event.pull_request.labels.*.name, ',') }}"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
             echo "PR Labels: $LABELS"
             if [[ "$LABELS" == *"major"* ]] || [[ "$LABELS" == *"breaking"* ]]; then
               BUMP_TYPE="major"
@@ -39,7 +41,7 @@ jobs:
               BUMP_TYPE="minor"
             fi
           fi
-          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> "$GITHUB_OUTPUT"
           echo "Version bump type: $BUMP_TYPE"
 
       - name: Bump version and push tag
