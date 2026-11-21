@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -159,7 +160,7 @@ func main() {
 	// Add persistent flags
 	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "AWS profile to use")
 	rootCmd.PersistentFlags().StringVarP(&region, "region", "r", "", "AWS region (optional, uses default region if not specified)")
-	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Path to a config file (default: ~/.aws-go-tools/config.yaml, then /etc/aws-go-tools/config.yaml)")
+	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Path to a config file (default: ~/.aws-go-tools/config.yaml, then /etc/aws-go-tools/config.yaml on Linux and macOS)")
 
 	// Add commands
 	rootCmd.AddCommand(versionCmd, ec2Cmd, rdsCmd, eniCmd)
@@ -173,8 +174,12 @@ func main() {
 // Shell values are sent to the instance as the SSM session command, so they
 // must be a bare executable path: no spaces, arguments or shell metacharacters.
 var shellPatterns = map[string]*regexp.Regexp{
-	"linux":   regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`),
-	"windows": regexp.MustCompile(`^([A-Za-z]:\\)?[A-Za-z0-9._\\-]+\.exe$`),
+	"linux": regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`),
+	// Optional drive, then single-backslash-separated segments that each start
+	// with a letter, digit or underscore. That excludes UNC and device paths
+	// (\\host\share, \\.\pipe), rooted paths without a drive, ".." segments
+	// and names that look like options.
+	"windows": regexp.MustCompile(`^([A-Za-z]:\\)?([A-Za-z0-9_][A-Za-z0-9._-]*\\)*[A-Za-z0-9_][A-Za-z0-9._-]*\.exe$`),
 }
 
 func validateShell(platform, shell string) error {
@@ -197,7 +202,20 @@ func defaultConfigPaths() []string {
 	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
 		paths = append(paths, filepath.Join(home, ".aws-go-tools", "config.yaml"))
 	}
-	return append(paths, "/etc/aws-go-tools/config.yaml")
+	if system := systemConfigPath(runtime.GOOS); system != "" {
+		paths = append(paths, system)
+	}
+	return paths
+}
+
+// systemConfigPath returns the system-wide config location, or "" where there
+// is none. Windows has none: "/etc/..." has no drive there, so it would
+// resolve against whatever drive the tool was started from.
+func systemConfigPath(goos string) string {
+	if goos == "windows" {
+		return ""
+	}
+	return "/etc/aws-go-tools/config.yaml"
 }
 
 // loadConfig returns the defaults overlaid with explicitPath if set, otherwise

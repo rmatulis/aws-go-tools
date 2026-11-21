@@ -205,7 +205,7 @@ go tool cover -html=coverage.out
 |------|-------|-------------|----------|---------|  
 | `--profile` | `-p` | AWS profile name from ~/.aws/credentials | No | Default profile |
 | `--region` | `-r` | AWS region | No | Default region from profile |
-| `--config` | `-c` | Path to a config file (see [CONFIG.md](CONFIG.md)) | No | `~/.aws-go-tools/config.yaml`, then `/etc/aws-go-tools/config.yaml` |
+| `--config` | `-c` | Path to a config file (see [CONFIG.md](CONFIG.md)) | No | `~/.aws-go-tools/config.yaml`, then `/etc/aws-go-tools/config.yaml` (Linux and macOS) |
 
 ### Available Commands
 

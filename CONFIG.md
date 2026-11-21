@@ -10,7 +10,7 @@ The tool looks for a configuration file in the following order:
 
 1. The path given with `--config <path>` (or `-c <path>`). If this flag is set, only that file is used.
 2. `~/.aws-go-tools/config.yaml` in your home directory
-3. `/etc/aws-go-tools/config.yaml` (system-wide)
+3. `/etc/aws-go-tools/config.yaml` (system-wide; Linux and macOS only, there is no system-wide location on Windows)
 
 The first configuration file found will be used. If no configuration file is found, default settings are applied.
 
@@ -23,7 +23,9 @@ A configuration file that exists but cannot be read, is not valid YAML, or names
 A shell must be a bare executable path with no spaces, arguments or shell metacharacters:
 
 - **Linux**: an absolute path made of letters, digits, `.`, `_`, `-` and `/` (for example `/bin/bash`, `/usr/local/bin/fish`)
-- **Windows**: an `.exe` name or path made of letters, digits, `.`, `_`, `-` and `\`, optionally starting with a drive letter (for example `powershell.exe`, `C:\Windows\System32\cmd.exe`). Paths containing spaces, such as anything under `C:\Program Files`, are not accepted.
+- **Windows**: an `.exe` name or path made of letters, digits, `.`, `_`, `-` and `\`, optionally starting with a drive letter (for example `powershell.exe`, `C:\Windows\System32\cmd.exe`). Not accepted: paths containing spaces (such as anything under `C:\Program Files`), network or device paths starting with `\\`, paths starting with a single `\`, and `..` segments.
+
+These rules restrict the form of the value, not which program it names. The shell still runs on your instances, so only use config files you trust.
 
 ## Default Configuration
 

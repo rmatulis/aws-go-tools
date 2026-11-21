@@ -401,6 +401,13 @@ func TestValidateShell(t *testing.T) {
 		{"windows", `C:\Program Files\PowerShell\7\pwsh.exe`, true},
 		{"windows", "cmd.exe /c calc.exe", true},
 		{"windows", "powershell", true},
+		{"windows", `\\attacker.example\share\payload.exe`, true},
+		{"windows", `\\.\pipe\x.exe`, true},
+		{"windows", `..\..\x.exe`, true},
+		{"windows", `C:\\x.exe`, true},
+		{"windows", `\x.exe`, true},
+		{"windows", "-enc.exe", true},
+		{"windows", `tools\pwsh.exe`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.platform+"/"+tt.shell, func(t *testing.T) {
@@ -534,4 +541,18 @@ func TestRDSConnectionExamples(t *testing.T) {
 			t.Errorf("got %v", got)
 		}
 	})
+}
+
+func TestSystemConfigPath(t *testing.T) {
+	if got := systemConfigPath("linux"); got != "/etc/aws-go-tools/config.yaml" {
+		t.Errorf("linux: got %q", got)
+	}
+	if got := systemConfigPath("darwin"); got != "/etc/aws-go-tools/config.yaml" {
+		t.Errorf("darwin: got %q", got)
+	}
+	// On Windows "/etc/..." has no volume name, so it would resolve against
+	// the current drive and stop being a fixed location.
+	if got := systemConfigPath("windows"); got != "" {
+		t.Errorf("windows: got %q, want no system path", got)
+	}
 }
