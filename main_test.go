@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -379,4 +381,103 @@ func TestRDSEngineVersions(t *testing.T) {
 			t.Errorf("Oracle engine %s should be filtered out", engine)
 		}
 	}
+}
+
+func TestValidateShell(t *testing.T) {
+	tests := []struct {
+		platform, shell string
+		wantErr         bool
+	}{
+		{"linux", "/bin/bash", false},
+		{"linux", "/usr/local/bin/fish", false},
+		{"linux", "bash", true},
+		{"linux", "/bin/bash -c id", true},
+		{"linux", "/bin/sh;id", true},
+		{"linux", "$(id)", true},
+		{"linux", "", true},
+		{"windows", "powershell.exe", false},
+		{"windows", "cmd.exe", false},
+		{"windows", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, false},
+		{"windows", `C:\Program Files\PowerShell\7\pwsh.exe`, true},
+		{"windows", "cmd.exe /c calc.exe", true},
+		{"windows", "powershell", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.platform+"/"+tt.shell, func(t *testing.T) {
+			if err := validateShell(tt.platform, tt.shell); (err != nil) != tt.wantErr {
+				t.Errorf("validateShell(%q, %q) error = %v, wantErr %v", tt.platform, tt.shell, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfig(t *testing.T) {
+	write := func(t *testing.T, dir, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	missing := filepath.Join(t.TempDir(), "absent.yaml")
+
+	t.Run("no files gives defaults", func(t *testing.T) {
+		cfg, err := loadConfig("", []string{missing})
+		if err != nil || cfg.Linux.Shell != "/bin/bash" || cfg.Windows.Shell != "powershell.exe" {
+			t.Fatalf("got %+v, %v", cfg, err)
+		}
+	})
+	t.Run("working directory config is ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "linux:\n  shell: /bin/zsh\n")
+		t.Chdir(dir)
+		cfg, err := loadConfig("", []string{missing})
+		if err != nil || cfg.Linux.Shell != "/bin/bash" {
+			t.Fatalf("got %+v, %v", cfg, err)
+		}
+	})
+	t.Run("first existing search path wins and keeps other default", func(t *testing.T) {
+		a := write(t, t.TempDir(), "linux:\n  shell: /bin/zsh\n")
+		b := write(t, t.TempDir(), "linux:\n  shell: /bin/sh\n")
+		cfg, err := loadConfig("", []string{missing, a, b})
+		if err != nil || cfg.Linux.Shell != "/bin/zsh" || cfg.Windows.Shell != "powershell.exe" {
+			t.Fatalf("got %+v, %v", cfg, err)
+		}
+	})
+	t.Run("malformed file is an error, not a fallthrough", func(t *testing.T) {
+		bad := write(t, t.TempDir(), "linux: [unclosed\n")
+		good := write(t, t.TempDir(), "linux:\n  shell: /bin/sh\n")
+		if _, err := loadConfig("", []string{bad, good}); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Fatalf("want error naming %s, got %v", bad, err)
+		}
+	})
+	t.Run("invalid shell is an error", func(t *testing.T) {
+		p := write(t, t.TempDir(), "linux:\n  shell: /bin/bash -c id\n")
+		if _, err := loadConfig("", []string{p}); err == nil {
+			t.Fatal("want error")
+		}
+	})
+	t.Run("explicit path is used and must exist", func(t *testing.T) {
+		p := write(t, t.TempDir(), "windows:\n  shell: cmd.exe\n")
+		cfg, err := loadConfig(p, []string{missing})
+		if err != nil || cfg.Windows.Shell != "cmd.exe" {
+			t.Fatalf("got %+v, %v", cfg, err)
+		}
+		if _, err := loadConfig(missing, nil); err == nil {
+			t.Fatal("want error for missing explicit path")
+		}
+	})
+}
+
+func TestDefaultConfigPaths(t *testing.T) {
+	check := func(t *testing.T) {
+		for _, p := range defaultConfigPaths() {
+			if !filepath.IsAbs(p) {
+				t.Errorf("relative config path %q", p)
+			}
+		}
+	}
+	t.Run("with HOME", func(t *testing.T) { t.Setenv("HOME", t.TempDir()); check(t) })
+	t.Run("HOME unset", func(t *testing.T) { t.Setenv("HOME", ""); check(t) })
 }

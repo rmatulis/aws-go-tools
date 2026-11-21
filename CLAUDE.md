@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`aws-go-tools` is a single-binary Go CLI (Cobra) with three subcommands, all sharing the persistent flags `--profile/-p` and `--region/-r`:
+`aws-go-tools` is a single-binary Go CLI (Cobra) with three subcommands, all sharing the persistent flags `--profile/-p`, `--region/-r` and `--config/-c`:
 
 - `ec2` — list EC2 instances, pick one interactively, open an SSM shell session
 - `rds` — list RDS instances, pick one, print an IAM auth token plus engine-specific connection examples
@@ -36,7 +36,7 @@ CI (`.github/workflows/pr-validation.yml`) fails a PR on `gofmt -l .` output, `g
 
 Everything lives in `main.go` (package `main`); there are no internal packages. Each subcommand follows the same pipeline:
 
-1. `loadConfig()` runs once at the top of `main()` and fills the global `appConfig`.
+1. The root command's `PersistentPreRunE` calls `loadConfig` and fills the global `appConfig` (so a bad config fails every subcommand, including `version`).
 2. The Cobra `Run` func calls `loadAWSConfig(ctx)`, which reads the global `profile`/`region` flag vars into an `aws.Config`.
 3. A `handle*` function orchestrates: `list*` (AWS SDK call → local struct) → `select*` (survey prompt) → action.
 
@@ -44,7 +44,7 @@ Things worth knowing before changing it:
 
 - **Error handling is split by layer.** `list*`, `select*`, `connectToInstance`, `generateRDSAuthToken`, and `findENIByIP` return wrapped errors; only the `handle*` functions and `loadAWSConfig` call `log.Fatalf`. Keep new logic in the error-returning layer.
 - **The SSM session is delegated to an external binary.** `connectToInstance` calls `ssm.StartSession` with the `AWS-StartInteractiveCommand` document (the shell is passed as its `command` parameter), then execs `session-manager-plugin` with the JSON-marshalled `SessionData`, the region, and `StartSession`. Before running it, the local terminal is put in raw mode and SIGINT is ignored in the parent so Ctrl+C reaches the remote shell as a byte instead of killing the session; both are restored via `defer`. Changes here need a manual test against a real instance.
-- **Shell selection comes from YAML config.** `loadConfig()` tries `./config.yaml`, `~/.aws-go-tools/config.yaml`, then `/etc/aws-go-tools/config.yaml`, uses the first that reads and parses, and otherwise falls back to `/bin/bash` (Linux) and `powershell.exe` (Windows). Platform is decided in `listInstances` from the EC2 `Platform` and `PlatformDetails` fields, defaulting to Linux. `config.yaml` in the repo root is gitignored, and because the cwd is searched first, a local one affects `go run`. User-facing docs are in `CONFIG.md`.
+- **Shell selection comes from YAML config.** `loadConfig(explicitPath, searchPaths)` uses the `--config/-c` file if given, otherwise the first existing of `~/.aws-go-tools/config.yaml` and `/etc/aws-go-tools/config.yaml` (`defaultConfigPaths()`), and falls back to `/bin/bash` (Linux) and `powershell.exe` (Windows). The working directory is deliberately never searched, and every shell value must pass `validateShell` (bare executable path, no spaces or arguments), because the shell is the command SSM runs on the instance; a file that exists but is unreadable, malformed or invalid is a hard error, not a fallback. Platform is decided in `listInstances` from the EC2 `Platform` and `PlatformDetails` fields, defaulting to Linux. User-facing docs are in `CONFIG.md`.
 - **Selection maps back by formatted string.** `selectInstance` / `selectRDSInstance` build option strings and look up the chosen one by string equality, so two entries that format identically resolve to the first.
 - **Listing is not paginated.** `DescribeInstances` and `DescribeDBInstances` are each called once. Terminated EC2 instances and Oracle RDS engines (no IAM auth) are filtered out.
 - **ENI service identification is heuristic.** For requester-managed ENIs, `identifyAWSService` substring-matches the description and requester ID against a `map`; map iteration order is random, so overlapping patterns (e.g. `elb` and `elbv2`) can match non-deterministically. Otherwise the attachment's instance ID or the ENI `InterfaceType` is used. VPC/subnet/instance name lookups are best-effort and swallow errors.

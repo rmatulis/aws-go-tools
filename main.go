@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -31,8 +33,9 @@ var Version = "dev"
 
 // Global flags
 var (
-	profile string
-	region  string
+	profile    string
+	region     string
+	configFile string
 )
 
 type Instance struct {
@@ -90,13 +93,21 @@ type ShellConfig struct {
 var appConfig Config
 
 func main() {
-	// Load configuration
-	loadConfig()
-
 	rootCmd := &cobra.Command{
 		Use:   "aws-go-tools",
 		Short: "AWS tools for EC2 SSM connections and RDS IAM authentication",
 		Long:  `A CLI tool to connect to EC2 instances via SSM and generate RDS IAM authentication tokens.`,
+		// main prints the error itself; without this Cobra prints it a second time
+		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(configFile, defaultConfigPaths())
+			if err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
+			appConfig = cfg
+			return nil
+		},
 	}
 
 	// Version command
@@ -148,6 +159,7 @@ func main() {
 	// Add persistent flags
 	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "AWS profile to use")
 	rootCmd.PersistentFlags().StringVarP(&region, "region", "r", "", "AWS region (optional, uses default region if not specified)")
+	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Path to a config file (default: ~/.aws-go-tools/config.yaml, then /etc/aws-go-tools/config.yaml)")
 
 	// Add commands
 	rootCmd.AddCommand(versionCmd, ec2Cmd, rdsCmd, eniCmd)
@@ -158,34 +170,72 @@ func main() {
 	}
 }
 
-func loadConfig() {
-	// Set default configuration
-	appConfig = Config{
-		Linux: ShellConfig{
-			Shell: "/bin/bash",
-		},
-		Windows: ShellConfig{
-			Shell: "powershell.exe",
-		},
+// Shell values are sent to the instance as the SSM session command, so they
+// must be a bare executable path: no spaces, arguments or shell metacharacters.
+var shellPatterns = map[string]*regexp.Regexp{
+	"linux":   regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`),
+	"windows": regexp.MustCompile(`^([A-Za-z]:\\)?[A-Za-z0-9._\\-]+\.exe$`),
+}
+
+func validateShell(platform, shell string) error {
+	pattern, ok := shellPatterns[platform]
+	if !ok {
+		return fmt.Errorf("unknown platform %q", platform)
+	}
+	if !pattern.MatchString(shell) {
+		return fmt.Errorf("invalid %s shell %q: must be a bare executable path with no spaces or arguments", platform, shell)
+	}
+	return nil
+}
+
+// defaultConfigPaths returns the config locations searched when --config is
+// not given. Every path is absolute: the working directory is never searched,
+// so a config.yaml planted in a cloned repository or shared directory cannot
+// choose the command that runs on a remote instance.
+func defaultConfigPaths() []string {
+	var paths []string
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		paths = append(paths, filepath.Join(home, ".aws-go-tools", "config.yaml"))
+	}
+	return append(paths, "/etc/aws-go-tools/config.yaml")
+}
+
+// loadConfig returns the defaults overlaid with explicitPath if set, otherwise
+// with the first of searchPaths that exists. A file that exists but cannot be
+// read, parsed or validated is an error rather than a fallback.
+func loadConfig(explicitPath string, searchPaths []string) (Config, error) {
+	cfg := Config{
+		Linux:   ShellConfig{Shell: "/bin/bash"},
+		Windows: ShellConfig{Shell: "powershell.exe"},
 	}
 
-	// Try to load config from file
-	configPaths := []string{
-		"config.yaml",
-		filepath.Join(os.Getenv("HOME"), ".aws-go-tools", "config.yaml"),
-		"/etc/aws-go-tools/config.yaml",
+	paths := searchPaths
+	if explicitPath != "" {
+		paths = []string{explicitPath}
 	}
 
-	for _, configPath := range configPaths {
-		if data, err := os.ReadFile(configPath); err == nil {
-			if err := yaml.Unmarshal(data, &appConfig); err == nil {
-				fmt.Printf("Loaded configuration from: %s\n", configPath)
-				return
+	for _, path := range paths {
+		data, err := os.ReadFile(path) // #nosec G304 G703 -- path is the --config flag or a fixed per-user/system location
+		if err != nil {
+			if explicitPath == "" && errors.Is(err, os.ErrNotExist) {
+				continue
 			}
+			return Config{}, fmt.Errorf("failed to read config %s: %w", path, err)
 		}
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return Config{}, fmt.Errorf("failed to parse config %s: %w", path, err)
+		}
+		if err := validateShell("linux", cfg.Linux.Shell); err != nil {
+			return Config{}, fmt.Errorf("config %s: %w", path, err)
+		}
+		if err := validateShell("windows", cfg.Windows.Shell); err != nil {
+			return Config{}, fmt.Errorf("config %s: %w", path, err)
+		}
+		fmt.Fprintf(os.Stderr, "Loaded configuration from: %s\n", path)
+		return cfg, nil
 	}
 
-	// Using default configuration if no file found
+	return cfg, nil
 }
 
 func loadAWSConfig(ctx context.Context) aws.Config {
