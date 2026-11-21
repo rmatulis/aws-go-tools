@@ -1,6 +1,6 @@
 module github.com/rmatulis/aws-go-tools
 
-go 1.23
+go 1.27.4
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
@@ -11,6 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/rds v1.113.1
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.67.7
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/term v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -33,7 +34,6 @@ require (
 	github.com/mattn/go-isatty v0.0.8 // indirect
 	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
-	golang.org/x/sys v0.0.0-20220722155257-8c9f86f7a55f // indirect
-	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211 // indirect
+	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.4.0 // indirect
 )

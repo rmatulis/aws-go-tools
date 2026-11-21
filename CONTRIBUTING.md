@@ -14,8 +14,8 @@ Thank you for your interest in contributing to this project!
 1. Make your changes in your feature branch
 2. Test your changes locally:
    ```bash
-   go build -o ec2-ssm-connector
-   ./ec2-ssm-connector --version
+   go build -o aws-go-tools
+   ./aws-go-tools version
    ```
 3. Ensure code follows Go conventions: `go fmt ./...`
 4. Test thoroughly with different scenarios
@@ -89,12 +89,12 @@ Optional longer description explaining the change in more detail.
 
 Before submitting:
 
-1. Build the binary: `go build -o ec2-ssm-connector`
+1. Build the binary: `go build -o aws-go-tools`
 2. Run tests: `make test` or `go test -v ./...`
 3. Check code formatting: `make fmt` or `go fmt ./...`
-4. Test EC2 SSM mode: `./ec2-ssm-connector --mode ec2 --profile test-profile`
-5. Test RDS mode: `./ec2-ssm-connector --mode rds --profile test-profile`
-6. Test version flag: `./ec2-ssm-connector --version`
+4. Test EC2 SSM mode: `./aws-go-tools ec2 --profile test-profile`
+5. Test RDS mode: `./aws-go-tools rds --profile test-profile`
+6. Test version command: `./aws-go-tools version`
 
 ### Automated PR Checks
 

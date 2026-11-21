@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -21,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -29,8 +34,9 @@ var Version = "dev"
 
 // Global flags
 var (
-	profile string
-	region  string
+	profile    string
+	region     string
+	configFile string
 )
 
 type Instance struct {
@@ -49,6 +55,21 @@ type RDSInstance struct {
 	Port       int32
 	Engine     string
 	Status     string
+}
+
+// ENIInfo represents information about an ENI and its attachments
+type ENIInfo struct {
+	ENIID          string
+	PrivateIP      string
+	PublicIP       string
+	Status         string
+	SubnetID       string
+	SubnetName     string
+	VPCID          string
+	VPCName        string
+	AttachmentType string
+	AttachedTo     string
+	Description    string
 }
 
 // SessionData represents the data structure for SSM session manager plugin
@@ -73,13 +94,21 @@ type ShellConfig struct {
 var appConfig Config
 
 func main() {
-	// Load configuration
-	loadConfig()
-
 	rootCmd := &cobra.Command{
 		Use:   "aws-go-tools",
 		Short: "AWS tools for EC2 SSM connections and RDS IAM authentication",
 		Long:  `A CLI tool to connect to EC2 instances via SSM and generate RDS IAM authentication tokens.`,
+		// main prints the error itself; without this Cobra prints it a second time
+		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(configFile, defaultConfigPaths())
+			if err != nil {
+				cmd.SilenceUsage = true
+				return err
+			}
+			appConfig = cfg
+			return nil
+		},
 	}
 
 	// Version command
@@ -115,12 +144,26 @@ func main() {
 		},
 	}
 
+	// ENI lookup command
+	eniCmd := &cobra.Command{
+		Use:   "eni [ip-address]",
+		Short: "Lookup ENI by IP address and identify associated AWS service",
+		Long:  `Find the network interface associated with an IP address and determine which AWS service it belongs to.`,
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			ctx := context.Background()
+			cfg := loadAWSConfig(ctx)
+			handleENILookup(ctx, cfg, args[0])
+		},
+	}
+
 	// Add persistent flags
 	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "AWS profile to use")
 	rootCmd.PersistentFlags().StringVarP(&region, "region", "r", "", "AWS region (optional, uses default region if not specified)")
+	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Path to a config file (default: ~/.aws-go-tools/config.yaml, then /etc/aws-go-tools/config.yaml on Linux and macOS)")
 
 	// Add commands
-	rootCmd.AddCommand(versionCmd, ec2Cmd, rdsCmd)
+	rootCmd.AddCommand(versionCmd, ec2Cmd, rdsCmd, eniCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -128,34 +171,89 @@ func main() {
 	}
 }
 
-func loadConfig() {
-	// Set default configuration
-	appConfig = Config{
-		Linux: ShellConfig{
-			Shell: "/bin/bash",
-		},
-		Windows: ShellConfig{
-			Shell: "powershell.exe",
-		},
+// Shell values are sent to the instance as the SSM session command, so they
+// must be a bare executable path: no spaces, arguments or shell metacharacters.
+var shellPatterns = map[string]*regexp.Regexp{
+	"linux": regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`),
+	// Optional drive, then single-backslash-separated segments that each start
+	// with a letter, digit or underscore. That excludes UNC and device paths
+	// (\\host\share, \\.\pipe), rooted paths without a drive, ".." segments
+	// and names that look like options.
+	"windows": regexp.MustCompile(`^([A-Za-z]:\\)?([A-Za-z0-9_][A-Za-z0-9._-]*\\)*[A-Za-z0-9_][A-Za-z0-9._-]*\.exe$`),
+}
+
+func validateShell(platform, shell string) error {
+	pattern, ok := shellPatterns[platform]
+	if !ok {
+		return fmt.Errorf("unknown platform %q", platform)
+	}
+	if !pattern.MatchString(shell) {
+		return fmt.Errorf("invalid %s shell %q: must be a bare executable path with no spaces or arguments", platform, shell)
+	}
+	return nil
+}
+
+// defaultConfigPaths returns the config locations searched when --config is
+// not given. Every path is absolute: the working directory is never searched,
+// so a config.yaml planted in a cloned repository or shared directory cannot
+// choose the command that runs on a remote instance.
+func defaultConfigPaths() []string {
+	var paths []string
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		paths = append(paths, filepath.Join(home, ".aws-go-tools", "config.yaml"))
+	}
+	if system := systemConfigPath(runtime.GOOS); system != "" {
+		paths = append(paths, system)
+	}
+	return paths
+}
+
+// systemConfigPath returns the system-wide config location, or "" where there
+// is none. Windows has none: "/etc/..." has no drive there, so it would
+// resolve against whatever drive the tool was started from.
+func systemConfigPath(goos string) string {
+	if goos == "windows" {
+		return ""
+	}
+	return "/etc/aws-go-tools/config.yaml"
+}
+
+// loadConfig returns the defaults overlaid with explicitPath if set, otherwise
+// with the first of searchPaths that exists. A file that exists but cannot be
+// read, parsed or validated is an error rather than a fallback.
+func loadConfig(explicitPath string, searchPaths []string) (Config, error) {
+	cfg := Config{
+		Linux:   ShellConfig{Shell: "/bin/bash"},
+		Windows: ShellConfig{Shell: "powershell.exe"},
 	}
 
-	// Try to load config from file
-	configPaths := []string{
-		"config.yaml",
-		filepath.Join(os.Getenv("HOME"), ".aws-go-tools", "config.yaml"),
-		"/etc/aws-go-tools/config.yaml",
+	paths := searchPaths
+	if explicitPath != "" {
+		paths = []string{explicitPath}
 	}
 
-	for _, configPath := range configPaths {
-		if data, err := os.ReadFile(configPath); err == nil {
-			if err := yaml.Unmarshal(data, &appConfig); err == nil {
-				fmt.Printf("Loaded configuration from: %s\n", configPath)
-				return
+	for _, path := range paths {
+		data, err := os.ReadFile(path) // #nosec G304 G703 -- path is the --config flag or a fixed per-user/system location
+		if err != nil {
+			if explicitPath == "" && errors.Is(err, os.ErrNotExist) {
+				continue
 			}
+			return Config{}, fmt.Errorf("failed to read config %s: %w", path, err)
 		}
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return Config{}, fmt.Errorf("failed to parse config %s: %w", path, err)
+		}
+		if err := validateShell("linux", cfg.Linux.Shell); err != nil {
+			return Config{}, fmt.Errorf("config %s: %w", path, err)
+		}
+		if err := validateShell("windows", cfg.Windows.Shell); err != nil {
+			return Config{}, fmt.Errorf("config %s: %w", path, err)
+		}
+		fmt.Fprintf(os.Stderr, "Loaded configuration from: %s\n", path)
+		return cfg, nil
 	}
 
-	// Using default configuration if no file found
+	return cfg, nil
 }
 
 func loadAWSConfig(ctx context.Context) aws.Config {
@@ -296,32 +394,6 @@ func listInstances(ctx context.Context, cfg aws.Config) ([]Instance, error) {
 	return instances, nil
 }
 
-func displayInstances(instances []Instance) {
-	fmt.Println("\nAvailable EC2 Instances:")
-	fmt.Println(strings.Repeat("=", 120))
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "INSTANCE ID\tNAME\tSTATE\tTYPE\tPRIVATE IP\tPUBLIC IP")
-	fmt.Fprintln(w, strings.Repeat("-", 19)+"\t"+strings.Repeat("-", 30)+"\t"+
-		strings.Repeat("-", 10)+"\t"+strings.Repeat("-", 12)+"\t"+strings.Repeat("-", 15)+"\t"+strings.Repeat("-", 15))
-
-	for _, inst := range instances {
-		name := inst.Name
-		if name == "" {
-			name = "-"
-		}
-		publicIP := inst.PublicIP
-		if publicIP == "" {
-			publicIP = "-"
-		}
-
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			inst.ID, name, inst.State, inst.InstanceType, inst.PrivateIP, publicIP)
-	}
-	w.Flush()
-	fmt.Println(strings.Repeat("=", 120))
-}
-
 func selectInstance(instances []Instance) (Instance, error) {
 	var options []string
 	for _, inst := range instances {
@@ -420,9 +492,37 @@ func connectToInstance(ctx context.Context, cfg aws.Config, instance Instance) e
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	fmt.Println("Connected! Type 'exit' to close the session.")
+	// Check if stdin is a terminal and set up raw mode for proper control character handling
+	// This ensures Ctrl+C and other control sequences are passed through correctly to the remote shell
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		// Save the current terminal state
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			log.Printf("Warning: Failed to set terminal to raw mode: %v", err)
+		} else {
+			// Ensure we restore the terminal state when done
+			defer func() {
+				if err := term.Restore(fd, oldState); err != nil {
+					log.Printf("Warning: Failed to restore terminal state: %v", err)
+				}
+			}()
+		}
+	}
 
+	// Ignore SIGINT in the parent process so Ctrl+C doesn't terminate the session
+	// In raw mode, Ctrl+C sends literal bytes (0x03) through stdin to the remote shell
+	// We don't want the signal to also terminate our local session-manager-plugin process
+	signal.Ignore(os.Interrupt)
+	defer signal.Reset(os.Interrupt) // Restore default signal handling when done
+
+	fmt.Println("Connected! Type 'exit' to close the session.")
+	fmt.Println("Ctrl+C will interrupt commands running in the session.")
+
+	// Run the session-manager-plugin
+	// In raw mode, all control characters pass through to the remote shell as raw bytes
 	if err := cmd.Run(); err != nil {
+		fmt.Println("\nSession ended.")
 		return fmt.Errorf("session-manager-plugin error: %w", err)
 	}
 
@@ -468,32 +568,6 @@ func listRDSInstances(ctx context.Context, cfg aws.Config) ([]RDSInstance, error
 	}
 
 	return instances, nil
-}
-
-func displayRDSInstances(instances []RDSInstance) {
-	fmt.Println("\nAvailable RDS Instances:")
-	fmt.Println(strings.Repeat("=", 120))
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "IDENTIFIER\tENGINE\tSTATUS\tENDPOINT\tPORT")
-	fmt.Fprintln(w, strings.Repeat("-", 40)+"\t"+
-		strings.Repeat("-", 15)+"\t"+strings.Repeat("-", 15)+"\t"+strings.Repeat("-", 50)+"\t"+strings.Repeat("-", 6))
-
-	for _, inst := range instances {
-		endpoint := inst.Endpoint
-		if endpoint == "" {
-			endpoint = "-"
-		}
-		port := fmt.Sprintf("%d", inst.Port)
-		if inst.Port == 0 {
-			port = "-"
-		}
-
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			inst.Identifier, inst.Engine, inst.Status, endpoint, port)
-	}
-	w.Flush()
-	fmt.Println(strings.Repeat("=", 120))
 }
 
 func selectRDSInstance(instances []RDSInstance) (RDSInstance, error) {
@@ -569,27 +643,19 @@ func generateRDSAuthToken(ctx context.Context, cfg aws.Config, instance RDSInsta
 	fmt.Println(strings.Repeat("=", 120))
 	fmt.Println()
 
-	// Display connection examples
-	fmt.Println("Connection Examples:")
-	fmt.Println()
-
-	// MySQL/MariaDB
-	if strings.Contains(strings.ToLower(instance.Engine), "mysql") || strings.Contains(strings.ToLower(instance.Engine), "mariadb") {
-		fmt.Println("MySQL/MariaDB:")
-		fmt.Printf("  mysql -h %s -P %d -u %s --password='%s' --enable-cleartext-plugin --ssl-mode=REQUIRED\n",
-			instance.Endpoint, instance.Port, username, authToken)
+	// Display connection examples. The token is never repeated in them: it
+	// would end up in shell history and in the process list.
+	if examples := rdsConnectionExamples(instance.Engine, instance.Endpoint, instance.Port, username); len(examples) > 0 {
+		fmt.Println("Load the token into your shell without putting it in history:")
+		fmt.Println("  read -rs RDS_TOKEN && export RDS_TOKEN     # paste the token, press Enter")
+		fmt.Println("Download the RDS CA bundle once:")
+		fmt.Println("  curl -fsSLo global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem")
 		fmt.Println()
-	}
-
-	// PostgreSQL
-	if strings.Contains(strings.ToLower(instance.Engine), "postgres") {
-		fmt.Println("PostgreSQL:")
-		fmt.Printf("  psql \"host=%s port=%d dbname=your_database user=%s password=%s sslmode=require\"\n",
-			instance.Endpoint, instance.Port, username, authToken)
+		fmt.Println("Connection Examples:")
 		fmt.Println()
-		fmt.Println("Or using environment variable:")
-		fmt.Printf("  export PGPASSWORD='%s'\n", authToken)
-		fmt.Printf("  psql -h %s -p %d -U %s -d your_database\n", instance.Endpoint, instance.Port, username)
+		for _, line := range examples {
+			fmt.Println(line)
+		}
 		fmt.Println()
 	}
 
@@ -597,8 +663,299 @@ func generateRDSAuthToken(ctx context.Context, cfg aws.Config, instance RDSInsta
 	fmt.Println("  - Token is valid for 15 minutes from generation time")
 	fmt.Println("  - IAM database authentication must be enabled on the RDS instance")
 	fmt.Println("  - The database user must be configured to use IAM authentication")
-	fmt.Println("  - SSL/TLS connection is required")
+	fmt.Println("  - SSL/TLS with certificate verification is required; the examples verify against the RDS CA bundle")
 	fmt.Printf("  - Generated at: %s\n", time.Now().Format(time.RFC3339))
 
 	return nil
+}
+
+// shellQuote wraps s in single quotes so a POSIX shell treats it as one
+// literal word.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+var conninfoSafe = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+
+// rdsConnectionExamples returns copy-paste client commands for the engine, or
+// nil for an engine with no known client. The commands read the token from
+// $RDS_TOKEN and verify the server certificate against the RDS CA bundle. The
+// function does not receive the token, so no example can contain it.
+func rdsConnectionExamples(engine, endpoint string, port int32, username string) []string {
+	engine = strings.ToLower(engine)
+
+	switch {
+	case strings.Contains(engine, "mysql") || strings.Contains(engine, "mariadb"):
+		return []string{
+			"MySQL/MariaDB:",
+			fmt.Sprintf("  MYSQL_PWD=\"$RDS_TOKEN\" mysql -h %s -P %d -u %s --enable-cleartext-plugin --ssl-mode=VERIFY_IDENTITY --ssl-ca=./global-bundle.pem",
+				endpoint, port, shellQuote(username)),
+		}
+	case strings.Contains(engine, "postgres"):
+		if conninfoSafe.MatchString(username) {
+			return []string{
+				"PostgreSQL:",
+				fmt.Sprintf("  PGPASSWORD=\"$RDS_TOKEN\" psql \"host=%s port=%d dbname=your_database user=%s sslmode=verify-full sslrootcert=./global-bundle.pem\"",
+					endpoint, port, username),
+			}
+		}
+		return []string{
+			"PostgreSQL:",
+			fmt.Sprintf("  PGPASSWORD=\"$RDS_TOKEN\" PGSSLMODE=verify-full PGSSLROOTCERT=./global-bundle.pem psql -h %s -p %d -U %s -d your_database",
+				endpoint, port, shellQuote(username)),
+		}
+	}
+
+	return nil
+}
+
+// ENI Lookup Functions
+
+func handleENILookup(ctx context.Context, cfg aws.Config, ipAddress string) {
+	fmt.Printf("\nLooking up ENI for IP address: %s\n\n", ipAddress)
+
+	// Find the ENI
+	eniInfo, err := findENIByIP(ctx, cfg, ipAddress)
+	if err != nil {
+		log.Fatalf("Failed to find ENI: %v", err)
+	}
+
+	if eniInfo == nil {
+		fmt.Printf("No ENI found with IP address: %s\n", ipAddress)
+		return
+	}
+
+	// Display ENI information
+	displayENIInfo(eniInfo)
+}
+
+func findENIByIP(ctx context.Context, cfg aws.Config, ipAddress string) (*ENIInfo, error) {
+	ec2Client := ec2.NewFromConfig(cfg)
+
+	// Search for ENI by private IP
+	result, err := ec2Client.DescribeNetworkInterfaces(ctx, &ec2.DescribeNetworkInterfacesInput{
+		Filters: []types.Filter{
+			{
+				Name:   aws.String("addresses.private-ip-address"),
+				Values: []string{ipAddress},
+			},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe network interfaces: %w", err)
+	}
+
+	// If not found by private IP, try public IP via association
+	if len(result.NetworkInterfaces) == 0 {
+		result, err = ec2Client.DescribeNetworkInterfaces(ctx, &ec2.DescribeNetworkInterfacesInput{
+			Filters: []types.Filter{
+				{
+					Name:   aws.String("association.public-ip"),
+					Values: []string{ipAddress},
+				},
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to describe network interfaces by public IP: %w", err)
+		}
+	}
+
+	if len(result.NetworkInterfaces) == 0 {
+		return nil, nil
+	}
+
+	eni := result.NetworkInterfaces[0]
+
+	info := &ENIInfo{
+		ENIID:       aws.ToString(eni.NetworkInterfaceId),
+		Status:      string(eni.Status),
+		SubnetID:    aws.ToString(eni.SubnetId),
+		VPCID:       aws.ToString(eni.VpcId),
+		Description: aws.ToString(eni.Description),
+	}
+
+	// Get VPC name from tags
+	if info.VPCID != "" {
+		vpcResult, err := ec2Client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{
+			VpcIds: []string{info.VPCID},
+		})
+		if err == nil && len(vpcResult.Vpcs) > 0 {
+			for _, tag := range vpcResult.Vpcs[0].Tags {
+				if aws.ToString(tag.Key) == "Name" {
+					info.VPCName = aws.ToString(tag.Value)
+					break
+				}
+			}
+		}
+	}
+
+	// Get Subnet name from tags
+	if info.SubnetID != "" {
+		subnetResult, err := ec2Client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+			SubnetIds: []string{info.SubnetID},
+		})
+		if err == nil && len(subnetResult.Subnets) > 0 {
+			for _, tag := range subnetResult.Subnets[0].Tags {
+				if aws.ToString(tag.Key) == "Name" {
+					info.SubnetName = aws.ToString(tag.Value)
+					break
+				}
+			}
+		}
+	}
+
+	// Get private IP
+	if len(eni.PrivateIpAddresses) > 0 {
+		info.PrivateIP = aws.ToString(eni.PrivateIpAddresses[0].PrivateIpAddress)
+	}
+
+	// Get public IP if associated
+	if eni.Association != nil {
+		info.PublicIP = aws.ToString(eni.Association.PublicIp)
+	}
+
+	// Determine what the ENI is attached to
+	if eni.Attachment != nil {
+		info.AttachmentType = aws.ToString(eni.Attachment.AttachmentId)
+		instanceID := aws.ToString(eni.Attachment.InstanceId)
+
+		if instanceID != "" {
+			// Attached to an EC2 instance
+			info.AttachedTo = instanceID
+			info.AttachmentType = "EC2 Instance"
+
+			// Try to get instance name
+			instanceResult, err := ec2Client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
+				InstanceIds: []string{instanceID},
+			})
+			if err == nil && len(instanceResult.Reservations) > 0 && len(instanceResult.Reservations[0].Instances) > 0 {
+				instance := instanceResult.Reservations[0].Instances[0]
+				for _, tag := range instance.Tags {
+					if aws.ToString(tag.Key) == "Name" {
+						info.AttachedTo = fmt.Sprintf("%s (%s)", instanceID, aws.ToString(tag.Value))
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Check if it's attached to other AWS services based on description or requester ID
+	if eni.RequesterManaged != nil && *eni.RequesterManaged {
+		info.AttachmentType = identifyAWSService(info.Description, aws.ToString(eni.RequesterId))
+		info.AttachedTo = info.Description
+	}
+
+	// If still no attachment info, check interface type
+	if info.AttachmentType == "" {
+		switch eni.InterfaceType {
+		case types.NetworkInterfaceTypeNatGateway:
+			info.AttachmentType = "NAT Gateway"
+		case types.NetworkInterfaceTypeNetworkLoadBalancer:
+			info.AttachmentType = "Network Load Balancer"
+		case types.NetworkInterfaceTypeGatewayLoadBalancer:
+			info.AttachmentType = "Gateway Load Balancer"
+		case types.NetworkInterfaceTypeGatewayLoadBalancerEndpoint:
+			info.AttachmentType = "Gateway Load Balancer Endpoint"
+		case types.NetworkInterfaceTypeInterface:
+			info.AttachmentType = "Standard Network Interface"
+		default:
+			info.AttachmentType = string(eni.InterfaceType)
+		}
+	}
+
+	return info, nil
+}
+
+func identifyAWSService(description, requesterID string) string {
+	description = strings.ToLower(description)
+	requesterID = strings.ToLower(requesterID)
+
+	// Check description for known AWS services
+	servicePatterns := map[string]string{
+		"rds":                "RDS Database Instance",
+		"elb":                "Elastic Load Balancer",
+		"elbv2":              "Application/Network Load Balancer",
+		"lambda":             "Lambda Function",
+		"ecs":                "ECS Task",
+		"elasticache":        "ElastiCache Cluster",
+		"redshift":           "Redshift Cluster",
+		"dax":                "DynamoDB Accelerator (DAX)",
+		"aws glue":           "AWS Glue",
+		"sagemaker":          "SageMaker",
+		"workspaces":         "Amazon WorkSpaces",
+		"directory service":  "AWS Directory Service",
+		"vpn":                "VPN Connection",
+		"transit gateway":    "Transit Gateway",
+		"vpc endpoint":       "VPC Endpoint",
+		"privatelink":        "PrivateLink",
+		"api gateway":        "API Gateway",
+		"app runner":         "App Runner",
+		"msk":                "Managed Streaming for Kafka (MSK)",
+		"documentdb":         "DocumentDB Cluster",
+		"neptune":            "Neptune Database",
+		"fsx":                "FSx File System",
+		"efs mount target":   "EFS Mount Target",
+		"transfer":           "AWS Transfer Family",
+		"codebuild":          "CodeBuild",
+		"cloud9":             "AWS Cloud9",
+		"appstream":          "AppStream 2.0",
+		"global accelerator": "AWS Global Accelerator",
+		"cloudwan":           "AWS Cloud WAN",
+		"network firewall":   "AWS Network Firewall",
+		"verified access":    "AWS Verified Access",
+	}
+
+	for pattern, service := range servicePatterns {
+		if strings.Contains(description, pattern) || strings.Contains(requesterID, pattern) {
+			return service
+		}
+	}
+
+	// Check requester ID patterns
+	if strings.Contains(requesterID, "amazon") {
+		return "AWS Managed Service"
+	}
+
+	return "AWS Managed Resource"
+}
+
+func displayENIInfo(info *ENIInfo) {
+	fmt.Println("ENI Information:")
+	fmt.Println(strings.Repeat("=", 100))
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	// Write errors are sticky in tabwriter and surface from Flush below
+	row := func(label, value string) {
+		_, _ = fmt.Fprintf(w, "%s:\t%s\n", label, value)
+	}
+	withName := func(id, name string) string {
+		if name != "" {
+			return fmt.Sprintf("%s (%s)", id, name)
+		}
+		return id
+	}
+
+	row("ENI ID", info.ENIID)
+	row("Status", info.Status)
+	row("Private IP", info.PrivateIP)
+	if info.PublicIP != "" {
+		row("Public IP", info.PublicIP)
+	} else {
+		row("Public IP", "-")
+	}
+	row("VPC ID", withName(info.VPCID, info.VPCName))
+	row("Subnet ID", withName(info.SubnetID, info.SubnetName))
+	row("Service Type", info.AttachmentType)
+	if info.AttachedTo != "" {
+		row("Attached To", info.AttachedTo)
+	}
+	if info.Description != "" {
+		row("Description", info.Description)
+	}
+	if err := w.Flush(); err != nil {
+		log.Printf("Warning: Failed to write ENI information: %v", err)
+	}
+	fmt.Println(strings.Repeat("=", 100))
+	fmt.Println()
 }

@@ -7,13 +7,15 @@ on:
       - main
   workflow_dispatch:
 
+# Read-only by default; the two jobs that tag and publish ask for write access.
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
 
 jobs:
   bump-version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # Only run on merged PRs or manual dispatch
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     outputs:
@@ -22,16 +24,18 @@ jobs:
       bump_type: ${{ steps.determine_bump.outputs.bump_type }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Determine version bump from PR labels
         id: determine_bump
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           BUMP_TYPE="patch"
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            LABELS="${{ join(github.event.pull_request.labels.*.name, ',') }}"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
             echo "PR Labels: $LABELS"
             if [[ "$LABELS" == *"major"* ]] || [[ "$LABELS" == *"breaking"* ]]; then
               BUMP_TYPE="major"
@@ -39,12 +43,12 @@ jobs:
               BUMP_TYPE="minor"
             fi
           fi
-          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> "$GITHUB_OUTPUT"
           echo "Version bump type: $BUMP_TYPE"
 
       - name: Bump version and push tag
         id: bump
-        uses: anothrNick/github-tag-action@1.67.0
+        uses: anothrNick/github-tag-action@4ed44965e0db8dab2b466a16da04aec3cc312fd8 # 1.75.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WITH_V: true
@@ -76,12 +80,11 @@ jobs:
             output: aws-go-tools-windows-amd64.exe
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
 
       - name: Build binary
         env:
@@ -92,7 +95,7 @@ jobs:
           go build -ldflags="-s -w -X 'main.Version=${{ needs.bump-version.outputs.new_tag }}'" -o ${{ matrix.output }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.output }}
           path: ${{ matrix.output }}
@@ -100,17 +103,18 @@ jobs:
   create-release:
     needs: [bump-version, build-and-release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: ./binaries
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.bump-version.outputs.new_tag }}
           name: Release ${{ needs.bump-version.outputs.new_tag }}
@@ -121,24 +125,26 @@ jobs:
             ## Installation
 
             Download the appropriate binary for your platform:
-            - Linux AMD64: `ec2-ssm-connector-linux-amd64`
-            - Linux ARM64: `ec2-ssm-connector-linux-arm64`
-            - macOS AMD64 (Intel): `ec2-ssm-connector-darwin-amd64`
-            - macOS ARM64 (Apple Silicon): `ec2-ssm-connector-darwin-arm64`
-            - Windows AMD64: `ec2-ssm-connector-windows-amd64.exe`
+            - Linux AMD64: `aws-go-tools-linux-amd64`
+            - Linux ARM64: `aws-go-tools-linux-arm64`
+            - macOS AMD64 (Intel): `aws-go-tools-darwin-amd64`
+            - macOS ARM64 (Apple Silicon): `aws-go-tools-darwin-arm64`
+            - Windows AMD64: `aws-go-tools-windows-amd64.exe`
 
             Make the binary executable (Linux/macOS):
             ```bash
-            chmod +x ec2-ssm-connector-*
+            chmod +x aws-go-tools-*
             ```
 
             ## Features
-            - ✅ Connect to EC2 instances via AWS SSM
+            - ✅ Connect to EC2 instances via AWS SSM with configurable shells
             - ✅ Generate RDS IAM authentication tokens
-            - ✅ Interactive mode selection
+            - ✅ Interactive instance selection with searchable interface
             - ✅ AWS profile and region support
+            - ✅ Configurable shell support for Linux and Windows instances
+            - ✅ Modern CLI built with Cobra framework
           files: |
-            binaries/*/ec2-ssm-connector-*
+            binaries/*/aws-go-tools-*
           draft: false
           prerelease: false
         env:

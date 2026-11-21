@@ -10,6 +10,7 @@ A command-line tool to manage AWS resources including EC2 instances via Systems 
 - 🚀 Connect to EC2 instances via AWS SSM Session Manager
 - 🗄️ List RDS database instances
 - 🔑 Generate IAM authentication tokens for RDS databases
+- 🌐 Lookup Elastic Network Interfaces (ENI) by IP address and identify associated AWS services
 - 🔐 Support for AWS profiles and regions
 - ⚡ Built with Cobra CLI framework and Survey for interactive prompts
 - ✅ Comprehensive test coverage
@@ -39,6 +40,13 @@ A command-line tool to manage AWS resources including EC2 instances via Systems 
    - IAM database authentication must be enabled on the RDS instance
    - Database user must be configured for IAM authentication
    - SSL/TLS connection capability
+
+### For ENI Lookup
+
+1. **AWS CLI configured** with appropriate credentials
+2. **IAM Permissions** required:
+   - `ec2:DescribeNetworkInterfaces`
+   - `ec2:DescribeInstances` (optional, for enhanced EC2 instance details)
 
 ## Installation
 
@@ -175,12 +183,29 @@ go tool cover -html=coverage.out
 ./aws-go-tools rds -p production -r us-east-1
 ```
 
+### ENI Lookup Mode
+
+```bash
+# Lookup ENI by private IP address
+./aws-go-tools eni 10.0.1.100
+
+# Lookup ENI by public IP address
+./aws-go-tools eni 54.123.45.67
+
+# With profile and region
+./aws-go-tools eni 10.0.1.100 --profile production --region us-west-2
+
+# Or use short flags
+./aws-go-tools eni 10.0.1.100 -p production -r us-west-2
+```
+
 ### Command Line Options
 
 | Flag | Short | Description | Required | Default |
 |------|-------|-------------|----------|---------|  
 | `--profile` | `-p` | AWS profile name from ~/.aws/credentials | No | Default profile |
 | `--region` | `-r` | AWS region | No | Default region from profile |
+| `--config` | `-c` | Path to a config file (see [CONFIG.md](CONFIG.md)) | No | `~/.aws-go-tools/config.yaml`, then `/etc/aws-go-tools/config.yaml` (Linux and macOS) |
 
 ### Available Commands
 
@@ -188,6 +213,7 @@ go tool cover -html=coverage.out
 |---------|-------------|
 | `ec2` | Connect to EC2 instance via SSM |
 | `rds` | Generate RDS IAM authentication token |
+| `eni` | Lookup ENI by IP address and identify AWS service |
 | `version` | Print version information |
 | `help` | Help about any command |
 
@@ -282,17 +308,83 @@ IAM Authentication Token (valid for 15 minutes):
 prod-db.abc123xyz.us-east-1.rds.amazonaws.com:3306/?Action=connect&DBUser=admin&X-Amz-Algorithm=...
 ========================================================================================================================
 
+Load the token into your shell without putting it in history:
+  read -rs RDS_TOKEN && export RDS_TOKEN     # paste the token, press Enter
+Download the RDS CA bundle once:
+  curl -fsSLo global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
 Connection Examples:
 
 MySQL/MariaDB:
-  mysql -h prod-db.abc123xyz.us-east-1.rds.amazonaws.com -P 3306 -u admin --password='[TOKEN]' --enable-cleartext-plugin --ssl-mode=REQUIRED
+  MYSQL_PWD="$RDS_TOKEN" mysql -h prod-db.abc123xyz.us-east-1.rds.amazonaws.com -P 3306 -u 'admin' --enable-cleartext-plugin --ssl-mode=VERIFY_IDENTITY --ssl-ca=./global-bundle.pem
 
 Notes:
   - Token is valid for 15 minutes from generation time
   - IAM database authentication must be enabled on the RDS instance
   - The database user must be configured to use IAM authentication
-  - SSL/TLS connection is required
+  - SSL/TLS with certificate verification is required; the examples verify against the RDS CA bundle
   - Generated at: 2025-12-23T10:30:00Z
+```
+
+### ENI Lookup
+
+```
+$ ./aws-go-tools eni 10.0.1.100
+
+Looking up ENI for IP address: 10.0.1.100
+
+ENI Information:
+====================================================================================================
+ENI ID:         eni-0123456789abcdef0
+Status:         in-use
+Private IP:     10.0.1.100
+Public IP:      54.123.45.67
+VPC ID:         vpc-0a1b2c3d4e5f6g7h8 (Production VPC)
+Subnet ID:      subnet-0123456789abcdef (Public Subnet 1A)
+Service Type:   EC2 Instance
+Attached To:    i-0123456789abcdef0 (web-server-prod)
+Description:    Primary network interface
+====================================================================================================
+```
+
+**ENI Lookup with Lambda Function:**
+```
+$ ./aws-go-tools eni 10.0.2.50
+
+Looking up ENI for IP address: 10.0.2.50
+
+ENI Information:
+====================================================================================================
+ENI ID:         eni-0fedcba987654321a
+Status:         in-use
+Private IP:     10.0.2.50
+Public IP:      -
+VPC ID:         vpc-0a1b2c3d4e5f6g7h8 (Production VPC)
+Subnet ID:      subnet-0fedcba987654321 (Private Subnet 1A)
+Service Type:   Lambda Function
+Attached To:    AWS Lambda VPC ENI
+Description:    AWS Lambda VPC ENI-my-lambda-function-abc123
+====================================================================================================
+```
+
+**ENI Lookup with RDS Database:**
+```
+$ ./aws-go-tools eni 10.0.3.25
+
+Looking up ENI for IP address: 10.0.3.25
+
+ENI Information:
+====================================================================================================
+ENI ID:         eni-0abc123def456789b
+Status:         in-use
+Private IP:     10.0.3.25
+Public IP:      -
+VPC ID:         vpc-0a1b2c3d4e5f6g7h8
+Subnet ID:      subnet-0abc123def456789
+Service Type:   RDS Database Instance
+Attached To:    RDSNetworkInterface
+Description:    RDSNetworkInterface
+====================================================================================================
 ```
 
 ## Troubleshooting
@@ -307,6 +399,64 @@ Install the Session Manager plugin from [AWS Documentation](https://docs.aws.ama
 - Check that the instance has the required IAM role with SSM permissions
 - Ensure the instance is in "running" state
 - Verify your IAM user has `ssm:StartSession` permission
+
+#### "Cannot interrupt commands with Ctrl+C in SSM session"
+
+**This issue has been resolved!** The tool now automatically puts your terminal in raw mode during SSM sessions, which allows control characters (Ctrl+C, Ctrl+Z, etc.) to pass through correctly to the remote shell.
+
+**What was fixed:**
+- Terminal is now set to raw mode before starting the SSM session
+- Control characters are passed through directly to the remote shell as raw bytes
+- SIGINT is ignored in the parent process so Ctrl+C only affects the remote command, not the session
+- Terminal state is automatically restored when the session ends
+- Escape sequences like `^[[27;5;99~` no longer appear
+
+**How to use:**
+Simply connect normally and Ctrl+C will now interrupt the remote command (not the session):
+```bash
+./aws-go-tools ec2
+# Once connected, run:
+tail -f /var/log/syslog
+# Press Ctrl+C to interrupt the tail command
+# The session remains active - you can run more commands!
+# Type 'exit' when you want to close the session
+```
+
+**Important:** Ctrl+C now works correctly to stop remote processes without disconnecting the session. To end the session, type `exit`.
+
+**If you still experience issues (rare):**
+
+Some terminal emulators or SSH forwarding scenarios might still have limitations. Here are workarounds:
+
+**Option 1: Use alternative commands**
+```bash
+# Instead of tail -f, use tail with a line limit
+tail -n 100 /var/log/syslog
+
+# Or use timeout to automatically exit
+timeout 30 tail -f /var/log/syslog
+
+# Use less instead of tail for log viewing
+less +F /var/log/syslog  # Press Ctrl+C to stop following, then 'q' to quit
+```
+
+**Option 2: Use background processes**
+```bash
+# Run the command in background and kill it
+tail -f /var/log/syslog &
+# Note the PID, then kill it when done
+kill <PID>
+```
+
+**Option 3: Use screen or tmux**
+```bash
+# Start a screen session
+screen
+# Run your command
+tail -f /var/log/syslog
+# Detach with Ctrl+A then D
+# Reattach later with: screen -r
+```
 
 #### "No EC2 instances found"
 - Verify you're using the correct AWS profile and region
@@ -323,6 +473,19 @@ Install the Session Manager plugin from [AWS Documentation](https://docs.aws.ama
 #### "Connection refused" when using token
 - Verify IAM database authentication is enabled on the RDS instance
 - Check that the database user is created and configured for IAM authentication
+
+### ENI Lookup Issues
+
+#### "No ENI found with IP address"
+- Verify the IP address is correct and belongs to an ENI in the current region
+- Check you're using the correct AWS profile and region
+- Ensure you have ENIs in the specified region
+- The IP address could be in a different AWS region
+
+#### "Failed to find ENI"
+- Verify your IAM user has `ec2:DescribeNetworkInterfaces` permission
+- Check your AWS credentials are properly configured
+- Ensure network connectivity to AWS API endpoints
   - MySQL: `CREATE USER admin IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS';`
   - PostgreSQL: `CREATE USER admin WITH LOGIN; GRANT rds_iam TO admin;`
 - Ensure you're using SSL/TLS for the connection

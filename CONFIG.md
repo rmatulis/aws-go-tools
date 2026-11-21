@@ -6,13 +6,26 @@ AWS Go Tools supports configuration files to customize shell preferences for dif
 
 ## Configuration File Locations
 
-The tool searches for configuration files in the following order:
+The tool looks for a configuration file in the following order:
 
-1. `config.yaml` in the current directory
+1. The path given with `--config <path>` (or `-c <path>`). If this flag is set, only that file is used.
 2. `~/.aws-go-tools/config.yaml` in your home directory
-3. `/etc/aws-go-tools/config.yaml` (system-wide)
+3. `/etc/aws-go-tools/config.yaml` (system-wide; Linux and macOS only, there is no system-wide location on Windows)
 
 The first configuration file found will be used. If no configuration file is found, default settings are applied.
+
+The current directory is **not** searched. The configured shell is the command that runs on the remote instance, so a `config.yaml` picked up from whatever directory you happen to be in (a cloned repository, a shared folder) could run an arbitrary command on your instances. To use a config file from a project directory, pass it explicitly: `aws-go-tools --config ./config.yaml ec2`.
+
+A configuration file that exists but cannot be read, is not valid YAML, or names an invalid shell makes the tool exit with an error. It does not fall back to the defaults or to the next location.
+
+## Shell Value Rules
+
+A shell must be a bare executable path with no spaces, arguments or shell metacharacters:
+
+- **Linux**: an absolute path made of letters, digits, `.`, `_`, `-` and `/` (for example `/bin/bash`, `/usr/local/bin/fish`)
+- **Windows**: an `.exe` name or path made of letters, digits, `.`, `_`, `-` and `\`, optionally starting with a drive letter (for example `powershell.exe`, `C:\Windows\System32\cmd.exe`). Not accepted: paths containing spaces (such as anything under `C:\Program Files`), network or device paths starting with `\\`, paths starting with a single `\`, and `..` segments.
+
+These rules restrict the form of the value, not which program it names. The shell still runs on your instances, so only use config files you trust.
 
 ## Default Configuration
 
@@ -118,7 +131,11 @@ windows:
 
 ### Project-Specific Configuration
 
-Create a `config.yaml` file in your project directory where you run the tool.
+Create a `config.yaml` file in your project directory and pass it explicitly:
+
+```bash
+aws-go-tools --config ./config.yaml ec2
+```
 
 ### System-Wide Configuration
 
@@ -135,10 +152,9 @@ sudo nano /etc/aws-go-tools/config.yaml
 
 If your configuration isn't being applied:
 
-1. Check the file location matches one of the expected paths
-2. Verify the YAML syntax is correct
-3. Ensure proper indentation (use spaces, not tabs)
-4. Look for the "Loaded configuration from:" message when running the tool
+1. Check the file location matches one of the expected paths, or pass it with `--config`
+2. Look for the "Loaded configuration from:" message when running the tool
+3. If the tool exits with a "failed to parse config" or "invalid ... shell" error, fix the YAML syntax (spaces, not tabs) or the shell value named in the message
 
 ### Shell Not Found on Instance
 

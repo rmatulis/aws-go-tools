@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -378,5 +380,179 @@ func TestRDSEngineVersions(t *testing.T) {
 		if strings.Contains(strings.ToLower(rds.Engine), "oracle") {
 			t.Errorf("Oracle engine %s should be filtered out", engine)
 		}
+	}
+}
+
+func TestValidateShell(t *testing.T) {
+	tests := []struct {
+		platform, shell string
+		wantErr         bool
+	}{
+		{"linux", "/bin/bash", false},
+		{"linux", "/usr/local/bin/fish", false},
+		{"linux", "bash", true},
+		{"linux", "/bin/bash -c id", true},
+		{"linux", "/bin/sh;id", true},
+		{"linux", "$(id)", true},
+		{"linux", "", true},
+		{"windows", "powershell.exe", false},
+		{"windows", "cmd.exe", false},
+		{"windows", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, false},
+		{"windows", `C:\Program Files\PowerShell\7\pwsh.exe`, true},
+		{"windows", "cmd.exe /c calc.exe", true},
+		{"windows", "powershell", true},
+		{"windows", `\\attacker.example\share\payload.exe`, true},
+		{"windows", `\\.\pipe\x.exe`, true},
+		{"windows", `..\..\x.exe`, true},
+		{"windows", `C:\\x.exe`, true},
+		{"windows", `\x.exe`, true},
+		{"windows", "-enc.exe", true},
+		{"windows", `tools\pwsh.exe`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.platform+"/"+tt.shell, func(t *testing.T) {
+			if err := validateShell(tt.platform, tt.shell); (err != nil) != tt.wantErr {
+				t.Errorf("validateShell(%q, %q) error = %v, wantErr %v", tt.platform, tt.shell, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfig(t *testing.T) {
+	write := func(t *testing.T, dir, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, "config.yaml")
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	missing := filepath.Join(t.TempDir(), "absent.yaml")
+
+	t.Run("no files gives defaults", func(t *testing.T) {
+		cfg, err := loadConfig("", []string{missing})
+		if err != nil || cfg.Linux.Shell != "/bin/bash" || cfg.Windows.Shell != "powershell.exe" {
+			t.Fatalf("got %+v, %v", cfg, err)
+		}
+	})
+	t.Run("working directory config is ignored", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "linux:\n  shell: /bin/zsh\n")
+		t.Chdir(dir)
+		cfg, err := loadConfig("", []string{missing})
+		if err != nil || cfg.Linux.Shell != "/bin/bash" {
+			t.Fatalf("got %+v, %v", cfg, err)
+		}
+	})
+	t.Run("first existing search path wins and keeps other default", func(t *testing.T) {
+		a := write(t, t.TempDir(), "linux:\n  shell: /bin/zsh\n")
+		b := write(t, t.TempDir(), "linux:\n  shell: /bin/sh\n")
+		cfg, err := loadConfig("", []string{missing, a, b})
+		if err != nil || cfg.Linux.Shell != "/bin/zsh" || cfg.Windows.Shell != "powershell.exe" {
+			t.Fatalf("got %+v, %v", cfg, err)
+		}
+	})
+	t.Run("malformed file is an error, not a fallthrough", func(t *testing.T) {
+		bad := write(t, t.TempDir(), "linux: [unclosed\n")
+		good := write(t, t.TempDir(), "linux:\n  shell: /bin/sh\n")
+		if _, err := loadConfig("", []string{bad, good}); err == nil || !strings.Contains(err.Error(), bad) {
+			t.Fatalf("want error naming %s, got %v", bad, err)
+		}
+	})
+	t.Run("invalid shell is an error", func(t *testing.T) {
+		p := write(t, t.TempDir(), "linux:\n  shell: /bin/bash -c id\n")
+		if _, err := loadConfig("", []string{p}); err == nil {
+			t.Fatal("want error")
+		}
+	})
+	t.Run("explicit path is used and must exist", func(t *testing.T) {
+		p := write(t, t.TempDir(), "windows:\n  shell: cmd.exe\n")
+		cfg, err := loadConfig(p, []string{missing})
+		if err != nil || cfg.Windows.Shell != "cmd.exe" {
+			t.Fatalf("got %+v, %v", cfg, err)
+		}
+		if _, err := loadConfig(missing, nil); err == nil {
+			t.Fatal("want error for missing explicit path")
+		}
+	})
+}
+
+func TestDefaultConfigPaths(t *testing.T) {
+	check := func(t *testing.T) {
+		for _, p := range defaultConfigPaths() {
+			if !filepath.IsAbs(p) {
+				t.Errorf("relative config path %q", p)
+			}
+		}
+	}
+	t.Run("with HOME", func(t *testing.T) { t.Setenv("HOME", t.TempDir()); check(t) })
+	t.Run("HOME unset", func(t *testing.T) { t.Setenv("HOME", ""); check(t) })
+}
+
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"admin":   `'admin'`,
+		"o'brien": `'o'\''brien'`,
+		"a b;id":  `'a b;id'`,
+		"":        `''`,
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestRDSConnectionExamples(t *testing.T) {
+	join := func(engine, user string) string {
+		return strings.Join(rdsConnectionExamples(engine, "db.example.internal", 5432, user), "\n")
+	}
+	t.Run("postgres verifies the certificate", func(t *testing.T) {
+		out := join("aurora-postgresql", "app")
+		for _, want := range []string{"sslmode=verify-full", "sslrootcert=./global-bundle.pem", `PGPASSWORD="$RDS_TOKEN"`, "host=db.example.internal", "port=5432"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "sslmode=require") {
+			t.Error("unverified sslmode present")
+		}
+	})
+	t.Run("mysql verifies the certificate", func(t *testing.T) {
+		out := join("mariadb", "app")
+		for _, want := range []string{"--ssl-mode=VERIFY_IDENTITY", "--ssl-ca=./global-bundle.pem", `MYSQL_PWD="$RDS_TOKEN"`, "-u 'app'"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "--password") || strings.Contains(out, "REQUIRED") {
+			t.Error("password argument or unverified ssl-mode present")
+		}
+	})
+	t.Run("username with a quote is escaped", func(t *testing.T) {
+		if out := join("mysql", "o'brien"); !strings.Contains(out, `'o'\''brien'`) {
+			t.Errorf("unescaped username in:\n%s", out)
+		}
+		if out := join("postgres", "o'brien"); !strings.Contains(out, `-U 'o'\''brien'`) || !strings.Contains(out, "PGSSLMODE=verify-full") {
+			t.Errorf("want -U form with quoted user, got:\n%s", out)
+		}
+	})
+	t.Run("unknown engine yields no commands", func(t *testing.T) {
+		if got := rdsConnectionExamples("sqlserver-se", "h", 1433, "sa"); len(got) != 0 {
+			t.Errorf("got %v", got)
+		}
+	})
+}
+
+func TestSystemConfigPath(t *testing.T) {
+	if got := systemConfigPath("linux"); got != "/etc/aws-go-tools/config.yaml" {
+		t.Errorf("linux: got %q", got)
+	}
+	if got := systemConfigPath("darwin"); got != "/etc/aws-go-tools/config.yaml" {
+		t.Errorf("darwin: got %q", got)
+	}
+	// On Windows "/etc/..." has no volume name, so it would resolve against
+	// the current drive and stop being a fixed location.
+	if got := systemConfigPath("windows"); got != "" {
+		t.Errorf("windows: got %q, want no system path", got)
 	}
 }
