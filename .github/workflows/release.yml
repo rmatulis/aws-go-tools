@@ -7,13 +7,15 @@ on:
       - main
   workflow_dispatch:
 
+# Read-only by default; the two jobs that tag and publish ask for write access.
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
 
 jobs:
   bump-version:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     # Only run on merged PRs or manual dispatch
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     outputs:
@@ -22,7 +24,7 @@ jobs:
       bump_type: ${{ steps.determine_bump.outputs.bump_type }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -46,7 +48,7 @@ jobs:
 
       - name: Bump version and push tag
         id: bump
-        uses: anothrNick/github-tag-action@1.67.0
+        uses: anothrNick/github-tag-action@4ed44965e0db8dab2b466a16da04aec3cc312fd8 # 1.75.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WITH_V: true
@@ -78,10 +80,9 @@ jobs:
             output: aws-go-tools-windows-amd64.exe
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
@@ -94,7 +95,7 @@ jobs:
           go build -ldflags="-s -w -X 'main.Version=${{ needs.bump-version.outputs.new_tag }}'" -o ${{ matrix.output }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.output }}
           path: ${{ matrix.output }}
@@ -102,17 +103,18 @@ jobs:
   create-release:
     needs: [bump-version, build-and-release]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: ./binaries
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.bump-version.outputs.new_tag }}
           name: Release ${{ needs.bump-version.outputs.new_tag }}

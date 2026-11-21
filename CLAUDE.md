@@ -55,4 +55,6 @@ Things worth knowing before changing it:
 
 Merging a PR into `main` triggers `.github/workflows/release.yml`, which tags, cross-compiles, and publishes a GitHub release automatically. The version bump comes from PR labels: `major`/`breaking` → major, `minor`/`feature` → minor, anything else → patch. `CONTRIBUTING.md` asks for an entry under "Unreleased" in `CHANGELOG.md` and `type: description` commit messages (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
 
+Every action in both workflows is pinned to a full commit SHA with the version in a trailing comment (`uses: owner/action@<sha> # v1.2.3`); Dependabot (`.github/dependabot.yml`) raises the update PRs. When changing a pin by hand, resolve the SHA with `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha` and update the comment with it. Workflow-level permissions are read-only; only `bump-version`, `create-release` (`contents: write`) and `pr-comment` (`pull-requests: write`) get more.
+
 Both workflows take their Go version from `go.mod` (`go-version-file`), so bumping the `go` directive there is the only change needed to move CI to a new Go release.
